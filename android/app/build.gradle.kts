@@ -4,6 +4,9 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+val targetAbi = System.getenv("TOOLBOX_ABI")?.takeIf { it.isNotEmpty() } ?: "arm64-v8a"
+
 android {
     namespace = "com.mustafa.toolbox"
     compileSdk = flutter.compileSdkVersion
@@ -29,9 +32,17 @@ android {
         versionName = flutter.versionName
 
         // 64-bit phones only: keeps the APK small (Python, FFmpeg and whisper are native).
+        // CI builds an x86_64 variant (TOOLBOX_ABI) to run the self-test on an emulator.
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += listOf(targetAbi)
         }
+
+        // Self-test entry point (see MainActivity.runSelfTest); only enabled in CI test builds.
+        buildConfigField("boolean", "SELF_TEST", (System.getenv("TOOLBOX_SELFTEST") == "1").toString())
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     // Fixed key so new builds install as updates over old ones. CI writes it from the
@@ -60,13 +71,15 @@ android {
             useLegacyPackaging = true
             // Library AARs ship every ABI; we only build Flutter + whisper for arm64,
             // so drop the rest (saves ~130 MB and avoids half-working installs).
-            excludes += listOf("lib/armeabi-v7a/**", "lib/x86/**", "lib/x86_64/**")
+            excludes += allAbis.filter { it != targetAbi }.map { "lib/$it/**" }
         }
     }
 
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName(if (releaseKeystore.exists()) "release" else "debug")
+            // Flutter turns on R8 for release builds; keep the native-library glue intact.
+            proguardFiles("proguard-rules.pro")
         }
     }
 }

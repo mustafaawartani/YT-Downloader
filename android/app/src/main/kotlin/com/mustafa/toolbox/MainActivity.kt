@@ -11,6 +11,7 @@ import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.content.IntentCompat
 import com.google.android.gms.tasks.Tasks
@@ -30,6 +31,9 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /**
  * Native side of the toolbox. Three channels:
@@ -46,6 +50,8 @@ class MainActivity : FlutterActivity() {
     private lateinit var shareCh: MethodChannel
 
     private val cancelled = ConcurrentHashMap.newKeySet<String>()
+    // Updating swaps the yt-dlp files on disk: never do it while a command is running.
+    private val ytLock = ReentrantReadWriteLock()
     private val ytInitLock = Any()
     @Volatile private var ytReady = false
 
@@ -66,6 +72,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (BuildConfig.SELF_TEST) intent?.getStringExtra("toolbox_selftest")?.let { url -> io.execute { runSelfTest(url) } }
         if (savedInstanceState == null) handleShareIntent(intent)
     }
 
@@ -82,9 +89,21 @@ class MainActivity : FlutterActivity() {
                 val value = work()
                 main.post { result.success(value) }
             } catch (e: Throwable) {
-                main.post { result.error("error", e.message ?: e.javaClass.simpleName, null) }
+                Log.e(TAG, "native call failed", e)
+                main.post { result.error("error", describe(e), null) }
             }
         }
+    }
+
+    /** "Class: message" for the whole cause chain, so errors on screen are actionable. */
+    private fun describe(e: Throwable): String {
+        val parts = mutableListOf<String>()
+        var t: Throwable? = e
+        while (t != null && parts.size < 4) {
+            parts += "${t.javaClass.simpleName}: ${t.message ?: ""}".trim()
+            t = t.cause.takeIf { it !== t }
+        }
+        return parts.joinToString(" ← ").take(600)
     }
 
     private fun uriOf(source: String): Uri =
@@ -144,7 +163,10 @@ class MainActivity : FlutterActivity() {
             }
             "update" -> background(result) {
                 ensureYtDlp()
-                when (YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel._STABLE)) {
+                val status = ytLock.write {
+                    YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel._STABLE)
+                }
+                when (status) {
                     YoutubeDL.UpdateStatus.DONE -> "Updated to the latest yt-dlp"
                     YoutubeDL.UpdateStatus.ALREADY_UP_TO_DATE -> "yt-dlp is already up to date"
                     else -> "Done"
@@ -157,13 +179,16 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun runYtDlp(jobId: String, args: List<String>): Map<String, Any?> {
+    private fun runYtDlp(jobId: String, args: List<String>, onLine: ((String) -> Unit)? = null): Map<String, Any?> {
         ensureYtDlp()
         if (cancelled.remove(jobId)) return mapOf("cancelled" to true)
         val request = YoutubeDLRequest(emptyList<String>()).addCommands(args)
         return try {
-            val response = YoutubeDL.getInstance().execute(request, jobId, false) { _, _, line ->
-                main.post { ytCh.invokeMethod("line", mapOf("jobId" to jobId, "line" to line)) }
+            val response = ytLock.read {
+                YoutubeDL.getInstance().execute(request, jobId, false) { _, _, line ->
+                    if (onLine != null) onLine(line)
+                    else main.post { ytCh.invokeMethod("line", mapOf("jobId" to jobId, "line" to line)) }
+                }
             }
             if (cancelled.remove(jobId)) mapOf("cancelled" to true)
             else mapOf("exitCode" to response.exitCode, "out" to response.out, "err" to response.err)
@@ -171,9 +196,53 @@ class MainActivity : FlutterActivity() {
             cancelled.remove(jobId)
             mapOf("cancelled" to true)
         } catch (e: Exception) {
+            Log.w(TAG, "yt-dlp failed: ${describe(e)}")
             if (cancelled.remove(jobId)) mapOf("cancelled" to true)
-            else mapOf("exitCode" to 1, "out" to "", "err" to (e.message ?: e.javaClass.simpleName))
+            else mapOf("exitCode" to 1, "out" to "", "err" to describe(e))
         }
+    }
+
+    /**
+     * CI-only end-to-end check of the native download path on an emulator
+     * (adb shell am start ... --es toolbox_selftest <url>). Logs "TOOLBOX_SELFTEST ..." lines.
+     */
+    private fun runSelfTest(url: String) {
+        var pass = 0
+        var fail = 0
+        fun step(name: String, block: () -> String) {
+            try {
+                val detail = block()
+                pass++
+                Log.i(TAG, "TOOLBOX_SELFTEST PASS $name: $detail")
+            } catch (e: Throwable) {
+                fail++
+                Log.e(TAG, "TOOLBOX_SELFTEST FAIL $name: ${describe(e)}", e)
+            }
+        }
+        fun check(r: Map<String, Any?>): String {
+            if (r["exitCode"] != 0) throw IOException("exit=${r["exitCode"]} err=${r["err"]}")
+            return (r["out"] as String).take(200)
+        }
+        val dir = File(cacheDir, "selftest").apply { deleteRecursively(); mkdirs() }
+        step("init") { ensureYtDlp(); "ok" }
+        step("version") { check(runYtDlp("st-v", listOf("--version"))) }
+        step("info") { check(runYtDlp("st-i", listOf("--no-warnings", "-J", "--flat-playlist", url))).take(80) }
+        step("download-mp3") {
+            val files = mutableListOf<String>()
+            check(runYtDlp("st-d", listOf(
+                "--no-warnings", "-P", "home:${dir.absolutePath}", "-o", "%(title).80B.%(ext)s",
+                "--no-simulate", "--print", "after_move:@@F|%(filepath)s",
+                "-f", "ba/b", "-x", "--audio-format", "mp3", url,
+            )) { line -> if (line.startsWith("@@F|")) files += line.removePrefix("@@F|").trim() })
+            val f = File(files.single())
+            if (!f.exists() || f.length() < 1000 || f.extension != "mp3") throw IOException("bad output $f (${f.length()} bytes)")
+            "${f.name} ${f.length()} bytes"
+        }
+        step("save-to-downloads") {
+            val f = dir.listFiles()!!.first { it.extension == "mp3" }
+            saveToDownloads(f, "Toolbox/SelfTest")
+        }
+        Log.i(TAG, "TOOLBOX_SELFTEST DONE pass=$pass fail=$fail")
     }
 
     /** Publishes a finished file into the public Download/<folder> via MediaStore (no permission needed). */
@@ -355,6 +424,7 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        private const val TAG = "Toolbox"
         private const val REQ_FOLDER = 4242
     }
 }

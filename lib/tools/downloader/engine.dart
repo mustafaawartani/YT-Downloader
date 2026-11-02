@@ -52,13 +52,13 @@ abstract class YtDlpEngine {
   Future<void> cleanup(String jobId);
 
   Future<List<SearchResult>> search(String query) async {
-    final r = await run('search', searchArgs(query));
+    final r = await run('search-${DateTime.now().microsecondsSinceEpoch}', searchArgs(query));
     if (!r.ok) throw Exception(cleanError(r.err));
     return parseSearch(r.out);
   }
 
   Future<MediaInfo> info(String url) async {
-    final r = await run('info', infoArgs(url));
+    final r = await run('info-${DateTime.now().microsecondsSinceEpoch}', infoArgs(url));
     if (!r.ok) throw Exception(cleanError(r.err));
     return parseInfo(url, r.out);
   }
@@ -194,8 +194,17 @@ class AndroidYtDlp extends YtDlpEngine {
   @override
   bool get hasFfmpeg => true; // bundled by youtubedl-android
 
+  /// Channel call that surfaces the native error text instead of "PlatformException(...)".
+  static Future<T?> _call<T>(String method, [Object? args]) async {
+    try {
+      return await _channel.invokeMethod<T>(method, args);
+    } on PlatformException catch (e) {
+      throw Exception(e.message ?? e.code);
+    }
+  }
+
   @override
-  Future<void> ensureReady() => _ready ??= _channel.invokeMethod('init').catchError((Object e) {
+  Future<void> ensureReady() => _ready ??= _call<void>('init').catchError((Object e) {
     _ready = null;
     throw e;
   });
@@ -205,8 +214,8 @@ class AndroidYtDlp extends YtDlpEngine {
     await ensureReady();
     if (onLine != null) _listeners[jobId] = onLine;
     try {
-      final m = await _channel.invokeMapMethod<String, dynamic>('run', {'jobId': jobId, 'args': args});
-      if (m!['cancelled'] == true) throw CancelledException();
+      final m = Map<String, dynamic>.from((await _call<Map>('run', {'jobId': jobId, 'args': args}))!);
+      if (m['cancelled'] == true) throw CancelledException();
       return YtResult(m['exitCode'] as int, m['out'] as String? ?? '', m['err'] as String? ?? '');
     } finally {
       _listeners.remove(jobId);
@@ -219,13 +228,13 @@ class AndroidYtDlp extends YtDlpEngine {
   @override
   Future<String> version() async {
     await ensureReady();
-    return await _channel.invokeMethod<String>('version') ?? '?';
+    return await _call<String>('version') ?? '?';
   }
 
   @override
   Future<String> update() async {
     await ensureReady();
-    return await _channel.invokeMethod<String>('update') ?? 'Done';
+    return await _call<String>('update') ?? 'Done';
   }
 
   Future<String> _jobDir(String jobId) async {
@@ -243,7 +252,7 @@ class AndroidYtDlp extends YtDlpEngine {
   /// Copies into the public Download/Toolbox/<kind> folder via MediaStore.
   @override
   Future<String> finalize(String path, MediaKind kind) async {
-    final where = await _channel.invokeMethod<String>('saveToDownloads', {
+    final where = await _call<String>('saveToDownloads', {
       'path': path,
       'folder': '$appFolderName/${kind.folder}',
     });

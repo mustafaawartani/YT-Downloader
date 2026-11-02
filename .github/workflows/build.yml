@@ -75,6 +75,47 @@ jobs:
           name: Toolbox-android
           path: Toolbox.apk
 
+  android-selftest:
+    # Builds an x86_64 test APK and runs the real native download path on an emulator.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get whisper.cpp
+        run: git clone --depth 1 --branch "$WHISPER_CPP" https://github.com/ggml-org/whisper.cpp android/app/src/main/cpp/whisper.cpp
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build x86_64 self-test APK
+        env:
+          TOOLBOX_ABI: x86_64
+          TOOLBOX_SELFTEST: "1"
+        run: |
+          flutter build apk --release --target-platform android-x64
+          cp build/app/outputs/flutter-apk/app-release.apk Toolbox-selftest-x64.apk
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run self-test on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash .github/scripts/android-selftest.sh Toolbox-selftest-x64.apk
+
   windows:
     needs: test
     runs-on: windows-latest
@@ -116,7 +157,7 @@ jobs:
           path: Toolbox-windows.zip
 
   release:
-    needs: [android, windows]
+    needs: [android, android-selftest, windows]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
