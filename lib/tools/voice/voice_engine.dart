@@ -118,7 +118,7 @@ class AndroidVoice extends VoiceEngine {
   bool get canBrowseFolder => true;
 
   @override
-  String get translationNote => 'Everything runs on your phone. Audio and text never leave it.';
+  String get translationNote => 'Translation also runs on your phone; nothing leaves it.';
 
   @override
   Future<String?> pickFolder() => _ch.invokeMethod<String>('pickFolder');
@@ -194,7 +194,7 @@ class DesktopVoice extends VoiceEngine {
   bool get canBrowseFolder => false;
 
   @override
-  String get translationNote => 'Speech-to-text runs on this PC. Translation sends only the text to Google Translate.';
+  String get translationNote => 'Translation sends only the text to Google Translate.';
 
   @override
   Future<String> transcribe(String source, String language, void Function(int) onProgress) async {
