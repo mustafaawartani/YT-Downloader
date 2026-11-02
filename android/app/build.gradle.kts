@@ -58,6 +58,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // Library AARs ship every ABI; we only build Flutter + whisper for arm64,
+            // so drop the rest (saves ~130 MB and avoids half-working installs).
+            excludes += listOf("lib/armeabi-v7a/**", "lib/x86/**", "lib/x86_64/**")
         }
     }
 

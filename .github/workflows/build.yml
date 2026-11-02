@@ -61,7 +61,15 @@ jobs:
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: flutter build apk --release --target-platform android-arm64 --build-number ${{ github.run_number }}
-      - run: cp build/app/outputs/flutter-apk/app-release.apk Toolbox.apk
+      - name: Check APK only contains 64-bit ARM libraries
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk Toolbox.apk
+          unzip -l Toolbox.apk | grep -oE 'lib/[^/]+/' | sort -u
+          if unzip -l Toolbox.apk | grep -qE 'lib/(armeabi-v7a|x86|x86_64)/'; then echo "Unexpected ABI in APK"; exit 1; fi
+          for so in libflutter.so libpython.so libffmpeg.so libqjs.so libvoicejni.so libtranslate_jni.so; do
+            unzip -l Toolbox.apk | grep -q "lib/arm64-v8a/$so" || { echo "Missing $so"; exit 1; }
+          done
+          ls -la Toolbox.apk
       - uses: actions/upload-artifact@v4
         with:
           name: Toolbox-android
